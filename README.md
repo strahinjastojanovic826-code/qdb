@@ -66,11 +66,11 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
+```
+
 High-Throughput Pattern Scanning
 
 Execute bitwise search masks directly over pages of packed records:
-
-```
 
 ```rust
 
