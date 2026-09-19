@@ -42,6 +42,8 @@ Basic Usage
 
 use qdb::{QuatDb, QuatVal};
 
+```
+
 ```rust
 
 fn main() -> std::io::Result<()> {
@@ -68,6 +70,8 @@ High-Throughput Pattern Scanning
 
 Execute bitwise search masks directly over pages of packed records:
 
+```
+
 ```rust
 
 use qdb::QuatDb;
@@ -81,6 +85,8 @@ fn main() -> std::io::Result<()> {
     println!("Found {} matching chunk offsets in storage.", matches.len());
     Ok(())
 }
+
+```
 
 Audit & Benchmarks
 
