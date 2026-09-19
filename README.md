@@ -42,7 +42,6 @@ qdb = "0.1.0"
 
 Basic Usage
 
-```
 
 ```rust
 use qdb::{QuatDb, QuatVal};
