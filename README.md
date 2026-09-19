@@ -38,6 +38,8 @@ Add `qdb` to your project's `Cargo.toml`:
 [dependencies]
 qdb = "0.1.0"
 
+```
+
 Basic Usage
 
 use qdb::{QuatDb, QuatVal};
