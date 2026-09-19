@@ -44,6 +44,7 @@ Basic Usage
 
 ```
 
+```rust
 use qdb::{QuatDb, QuatVal};
 
 fn main() -> std::io::Result<()> {
