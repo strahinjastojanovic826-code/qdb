@@ -42,11 +42,11 @@ qdb = "0.1.0"
 
 Basic Usage
 
-use qdb::{QuatDb, QuatVal};
-
 ```
 
 ```rust
+
+use qdb::{QuatDb, QuatVal};
 
 fn main() -> std::io::Result<()> {
     // 1. Open or create a database instance
