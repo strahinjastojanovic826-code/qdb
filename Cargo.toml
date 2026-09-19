@@ -1,0 +1,13 @@
+[package]
+name = "qdb"
+version = "0.1.0"
+edition = "2024"
+authors = ["Strahinja Stojanovic <strahinjastojanovic826@gmail.com>"]
+description = "High-performance 4-state (2-bit quat) embedded database engine"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/strahinjastojanovic826-code/qdb"
+keywords = ["quat", "database", "bit-packing", "no-deps", "storage"]
+categories = ["database-engines", "data-structures"]
+
+[dependencies]
