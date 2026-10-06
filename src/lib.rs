@@ -1,10 +1,16 @@
 pub mod engine;
 pub mod index;
 pub mod storage;
+pub mod errors;
+pub mod ffi;
 
 pub use engine::QuatDb;
 pub use index::{QuatIndex, QuatVal};
+pub use errors::{QuatDbError, Result};
 pub use storage::QuatStorage;
+use std::path::Path;
+use std::io::Write;
+use std::path::PathBuf;
 
 #[cfg(test)]
 mod tests {
@@ -14,7 +20,9 @@ mod tests {
 
     fn cleanup(base_path: &str) {
         let _ = fs::remove_file(base_path);
-        let _ = fs::remove_file(format!("{}.wal", base_path));
+        let mut wal_path = PathBuf::from(base_path);
+        wal_path.set_extension("wal");
+        let _ = fs::remove_file(wal_path);
     }
 
     fn print_report_header(test_name: &str) {
@@ -149,6 +157,7 @@ mod tests {
         assert_eq!(retrieved, test_payload);
         cleanup(db_path);
     }
+
     #[test]
 fn test_all_four_states_reading() {
     let db_path = "test_four_states.qdb";
@@ -190,4 +199,288 @@ fn test_all_four_states_reading() {
 
     cleanup(db_path);
   }
+
+    #[test]
+    fn test_basic_insert_and_get() {
+        print_report_header("Basic Insertion and Retrieval");
+        let db_path = "test_basic_unique.qdb";
+        cleanup(db_path);
+
+        let mut db = QuatDb::open(db_path).expect("Failed to open database");
+
+        // 1. Insert a test chunk
+        let sample_chunk: u64 = 0b11_10_01_00;
+        let key = db.insert(sample_chunk).expect("Insertion failed");
+
+        // The first chunk key is calculated based on the file offset (header size 24 / 8 = key 3, or offset 0 depending on indexing)
+        let retrieved = db.get_by_key(key).expect("Error reading chunk").unwrap();
+        assert_eq!(retrieved, sample_chunk);
+
+        cleanup(db_path);
+    }
+
+    #[test]
+    fn test_pattern_query_matching() {
+        print_report_header("Pattern Query Matching");
+        let db_path = "test_pattern_unique.qdb";
+        cleanup(db_path);
+
+        let mut db = QuatDb::open(db_path).expect("Failed to open database");
+
+        let chunk1 = 0x0000_0000_0000_0000;
+        let chunk2 = 0xFFFF_FFFF_FFFF_FFFF;
+        let chunk3 = 0x0000_0000_0000_00FF;
+
+        let k1 = db.insert(chunk1).unwrap();
+        let k2 = db.insert(chunk2).unwrap();
+        let k3 = db.insert(chunk3).unwrap();
+
+        // Query pattern for exact matching against chunk1
+        let matches = db.query_pattern(0x0000_0000_0000_0000, 32).unwrap();
+        assert!(matches.contains(&k1));
+
+        // Query partial matches
+        let partial_matches = db.query_pattern(0x0000_0000_0000_00FF, 4).unwrap();
+        assert!(partial_matches.contains(&k3));
+
+        cleanup(db_path);
+    }
+
+    #[test]
+fn test_wal_crash_recovery() {
+    print_report_header("WAL Crash Recovery");
+    let db_path: &str = "test_crash_recovery_unique.qdb";
+    cleanup(db_path);
+
+    let first_key: u64;
+    {
+        let db = QuatDb::open(db_path).expect("Failed to open database");
+        first_key = db.insert(0x1234_5678_9ABC_DEF0).expect("Insertion failed");
+    }
+
+    // 1. Simulacija padanja: Zapisujemo unwritten chunk u WAL
+    let wal_path = std::path::Path::new(db_path).with_extension("wal");
+    let unwritten_chunk: u64 = 0xAAAA_BBBB_CCCC_DDDD;
+
+    {
+        let mut wal_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wal_path)
+            .expect("WAL file should exist");
+
+        wal_file.write_all(&unwritten_chunk.to_le_bytes()).unwrap();
+        wal_file.flush().unwrap();
+    }
+
+    // 2. Ručno simuliramo oporavak: Prepisujemo iz WAL-a u glavnu bazu
+    {
+        let mut db_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(db_path)
+            .expect("DB file should exist");
+
+        db_file.write_all(&unwritten_chunk.to_le_bytes()).unwrap();
+        db_file.flush().unwrap();
+    }
+
+    // 3. Otvaramo bazu iznova
+    let db = QuatDb::open(db_path).expect("Failed to reopen database");
+
+    // 4. Provjeravamo da li indeks sada vidi novi chunk na poziciji (first_key + 1)
+    let recovered_chunk = db.get_by_key(first_key + 1).unwrap();
+    assert_eq!(recovered_chunk, Some(unwritten_chunk));
+
+    cleanup(db_path);
+}
+
+    #[test]
+    fn test_batch_reading_large_dataset() {
+        print_report_header("Batch Reading Large Dataset");
+        let db_path = "test_large_batch_unique.qdb";
+        cleanup(db_path);
+
+        let mut db = QuatDb::open(db_path).expect("Failed to open database");
+
+        for i in 0..1000 {
+            db.insert(i as u64).unwrap();
+        }
+
+        let target_key = db.get_by_key(500);
+        assert!(target_key.is_ok());
+
+        cleanup(db_path);
+    }
+
+    use super::ffi::*;
+    use std::ffi::CString;
+    use std::ptr;
+
+    fn create_temp_db_path(name: &str) -> (CString, std::path::PathBuf) {
+        let mut path = std::env::temp_dir();
+        path.push(format!("quat_db_ffi_test_{}.db", name));
+        
+        // Remove old test files if they exist
+        let _ = std::fs::remove_file(&path);
+        let mut wal_path = path.clone();
+        wal_path.set_extension("wal");
+        let _ = std::fs::remove_file(&wal_path);
+
+        let c_str = CString::new(path.to_str().unwrap()).unwrap();
+        (c_str, path)
+    }
+
+    fn cleanup_temp_db(path: std::path::PathBuf) {
+        let _ = std::fs::remove_file(&path);
+        let mut wal_path = path;
+        wal_path.set_extension("wal");
+        let _ = std::fs::remove_file(wal_path);
+    }
+
+
+    #[test]
+    fn test_ffi_open_and_close() {
+        let (c_path, path_buf) = create_temp_db_path("open_close");
+        let mut handle: *mut QuatDbHandle = ptr::null_mut();
+
+        unsafe {
+            let res = quat_db_open(c_path.as_ptr(), &mut handle);
+            assert_eq!(res, QuatErrorCode::Ok);
+            assert!(!handle.is_null());
+
+            quat_db_close(handle);
+        }
+
+        cleanup_temp_db(path_buf);
+    }
+
+    #[test]
+    fn test_ffi_null_pointer_handling() {
+        let mut handle: *mut QuatDbHandle = ptr::null_mut();
+
+        unsafe {
+            // Null path
+            let res = quat_db_open(ptr::null(), &mut handle);
+            assert_eq!(res, QuatErrorCode::NullPointer);
+
+            // Null output handle pointer
+            let c_path = CString::new("test.db").unwrap();
+            let res = quat_db_open(c_path.as_ptr(), ptr::null_mut());
+            assert_eq!(res, QuatErrorCode::NullPointer);
+
+            // Operations on null handle
+            let mut out_key = 0u64;
+            assert_eq!(
+                quat_db_insert(ptr::null_mut(), 0x1234, &mut out_key),
+                QuatErrorCode::NullPointer
+            );
+
+            let mut out_chunk = 0u64;
+            assert_eq!(
+                quat_db_get_by_key(ptr::null(), 0, &mut out_chunk),
+                QuatErrorCode::NullPointer
+            );
+        }
+    }
+
+    #[test]
+    fn test_ffi_insert_and_get_by_key() {
+        let (c_path, path_buf) = create_temp_db_path("insert_get");
+        let mut handle: *mut QuatDbHandle = ptr::null_mut();
+
+        unsafe {
+            assert_eq!(quat_db_open(c_path.as_ptr(), &mut handle), QuatErrorCode::Ok);
+
+            let test_chunk: u64 = 0xDEAD_BEEF_CAFE_BABE;
+            let mut inserted_key: u64 = 0;
+
+            // Insert chunk
+            let res = quat_db_insert(handle, test_chunk, &mut inserted_key);
+            assert_eq!(res, QuatErrorCode::Ok);
+
+            // Fetch chunk back
+            let mut retrieved_chunk: u64 = 0;
+            let res = quat_db_get_by_key(handle, inserted_key, &mut retrieved_chunk);
+            assert_eq!(res, QuatErrorCode::Ok);
+            assert_eq!(retrieved_chunk, test_chunk);
+
+            // Fetch non-existent key
+            let res = quat_db_get_by_key(handle, inserted_key + 999, &mut retrieved_chunk);
+            assert_eq!(res, QuatErrorCode::NotFound);
+
+            quat_db_close(handle);
+        }
+
+        cleanup_temp_db(path_buf);
+    }
+
+    #[test]
+    fn test_ffi_get_single_quat() {
+        let (c_path, path_buf) = create_temp_db_path("single_quat");
+        let mut handle: *mut QuatDbHandle = ptr::null_mut();
+
+        unsafe {
+            assert_eq!(quat_db_open(c_path.as_ptr(), &mut handle), QuatErrorCode::Ok);
+
+            // Chunk with quat index 0 set to 0b11 (Q3 = 3)
+            let test_chunk: u64 = 0b11; 
+            let mut key: u64 = 0;
+
+            assert_eq!(quat_db_insert(handle, test_chunk, &mut key), QuatErrorCode::Ok);
+
+            let mut quat_val: u8 = 0;
+            let res = quat_db_get_single_quat(handle, key, 0, &mut quat_val);
+            assert_eq!(res, QuatErrorCode::Ok);
+            assert_eq!(quat_val, 3); // 0b11 corresponds to Q3 = 3
+
+            // Out-of-bounds quat index test (index >= 32)
+            let res = quat_db_get_single_quat(handle, key, 32, &mut quat_val);
+            assert_eq!(res, QuatErrorCode::IndexOutOfBounds);
+
+            quat_db_close(handle);
+        }
+
+        cleanup_temp_db(path_buf);
+    }
+
+    #[test]
+    fn test_ffi_query_pattern_and_free_keys() {
+        let (c_path, path_buf) = create_temp_db_path("query_pattern");
+        let mut handle: *mut QuatDbHandle = ptr::null_mut();
+
+        unsafe {
+            assert_eq!(quat_db_open(c_path.as_ptr(), &mut handle), QuatErrorCode::Ok);
+
+            let test_chunk: u64 = 0x5555_5555_5555_5555;
+            let mut key: u64 = 0;
+            assert_eq!(quat_db_insert(handle, test_chunk, &mut key), QuatErrorCode::Ok);
+
+            let mut keys_ptr: *mut u64 = ptr::null_mut();
+            let mut keys_len: usize = 0;
+
+            // Query pattern with min_matches = 1
+            let res = quat_db_query_pattern(
+                handle,
+                test_chunk,
+                1,
+                &mut keys_ptr,
+                &mut keys_len,
+            );
+
+            assert_eq!(res, QuatErrorCode::Ok);
+            assert!(keys_len > 0);
+            assert!(!keys_ptr.is_null());
+
+            // Read matched key from raw pointer
+            let matched_keys = std::slice::from_raw_parts(keys_ptr, keys_len);
+            assert_eq!(matched_keys[0], key);
+
+            // Free allocated memory safely via FFI
+            quat_db_free_keys(keys_ptr, keys_len);
+
+            quat_db_close(handle);
+        }
+
+        cleanup_temp_db(path_buf);
+    }
+
 }

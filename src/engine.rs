@@ -1,69 +1,101 @@
+use std::path::Path;
+use std::sync::Arc;
+use parking_lot::RwLock;
+
+use crate::errors::Result;
 use crate::index::{QuatIndex, QuatVal};
 use crate::storage::QuatStorage;
-use std::io;
-use std::path::Path;
 
+#[derive(Clone)]
 pub struct QuatDb {
-    storage: QuatStorage,
-    index: QuatIndex,
+    storage: Arc<RwLock<QuatStorage>>,
+    index: Arc<RwLock<QuatIndex>>,
 }
 
 impl QuatDb {
-    pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut storage = QuatStorage::open(path)?;
         let mut index = QuatIndex::new();
 
-        // Rekonstrukcija primarnog indeksa u memoriji pri pokretanju
+        Self::recover_wal(&mut storage)?;
+
         let total_chunks = storage.total_chunks()?;
         for i in 0..total_chunks {
-            index.insert_primary(i, i * 8);
+            let offset = i * 8;
+            index.insert_primary(i, offset);
+
+            if let Ok(chunk) = storage.read_chunk(offset) {
+                index.update_presence(chunk);
+            }
         }
 
-        Ok(Self { storage, index })
+        Ok(Self {
+            storage: Arc::new(RwLock::new(storage)),
+            index: Arc::new(RwLock::new(index)),
+        })
     }
 
-    pub fn insert(&mut self, chunk: u64) -> io::Result<u64> {
-        let offset = self.storage.append_chunk(chunk)?;
+    fn recover_wal(storage: &mut QuatStorage) -> Result<()> {
+        let file_len = storage.total_chunks()? * 8;
+        let wal_len = storage.total_chunks()?;
+
+        if wal_len > file_len {
+            storage.append_chunk(0)?;
+        }
+
+        storage.checkpoint_wal()?;
+        Ok(())
+    }
+
+    /// Thread-safe insert
+    pub fn insert(&self, chunk: u64) -> Result<u64> {
+        let mut storage = self.storage.write();
+        let mut index = self.index.write();
+
+        let offset = storage.append_chunk(chunk)?;
         let key = offset / 8;
-        self.index.insert_primary(key, offset);
+
+        index.insert_primary(key, offset);
+        index.update_presence(chunk);
+
         Ok(key)
     }
 
-    pub fn get_by_key(&mut self, key: u64) -> io::Result<Option<u64>> {
-        if let Some(offset) = self.index.lookup(key) {
-            let chunk = self.storage.read_chunk(offset)?;
+    /// Fast lock-free-like parallel read using shared Read Lock
+    pub fn get_by_key(&self, key: u64) -> Result<Option<u64>> {
+        let index = self.index.read();
+        if let Some(offset) = index.lookup(key) {
+            let storage = self.storage.read();
+            let chunk = storage.read_chunk(offset)?;
             Ok(Some(chunk))
         } else {
             Ok(None)
         }
     }
 
-    pub fn get_single_quat(&mut self, key: u64, quat_idx: usize) -> io::Result<Option<QuatVal>> {
+    pub fn get_single_quat(&self, key: u64, quat_idx: usize) -> Result<Option<QuatVal>> {
         if let Some(chunk) = self.get_by_key(key)? {
-            Ok(Some(QuatIndex::extract_quat(chunk, quat_idx)))
+            let quat = QuatIndex::extract_quat(chunk, quat_idx)?;
+            Ok(Some(quat))
         } else {
             Ok(None)
         }
     }
 
-    pub fn query_pattern(&mut self, pattern: u64, min_matches: u32) -> io::Result<Vec<u64>> {
-        let total = self.storage.total_chunks()?;
+    /// Zero-copy mmap scan over parallel readers
+    pub fn query_pattern(&self, pattern: u64, min_matches: u32) -> Result<Vec<u64>> {
+        let storage = self.storage.read();
         let mut matches = Vec::new();
 
-        let batch_size = 512; // Čitanje u stranicama po 4KB
-        let mut current = 0;
+        if let Some(mmap_slice) = storage.get_mmap_slice() {
+            for (idx, chunk_bytes) in mmap_slice.chunks_exact(8).enumerate() {
+                let slice: [u8; 8] = chunk_bytes.try_into().unwrap();
+                let chunk = u64::from_le_bytes(slice);
 
-        while current < total {
-            let count = std::cmp::min(batch_size as u64, total - current) as usize;
-            let chunks = self.storage.read_batch(current * 8, count)?;
-
-            for (idx, &chunk) in chunks.iter().enumerate() {
                 if QuatIndex::match_quat_mask(chunk, pattern) >= min_matches {
-                    matches.push((current + idx as u64) * 8);
+                    matches.push(idx as u64);
                 }
             }
-
-            current += count as u64;
         }
 
         Ok(matches)

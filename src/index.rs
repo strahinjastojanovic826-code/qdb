@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use crate::errors::{QuatDbError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuatVal {
@@ -9,14 +10,15 @@ pub enum QuatVal {
 }
 
 pub struct QuatIndex {
-    // Mapa koja povezuje ID zapisa ili hash sa offsetom u fajlu
-    primary_map: HashMap<u64, u64>,
+    pub primary_map: HashMap<u64, u64>,
+    pub presence_filter: Vec<u8>,
 }
 
 impl QuatIndex {
     pub fn new() -> Self {
         Self {
             primary_map: HashMap::new(),
+            presence_filter: Vec::new(),
         }
     }
 
@@ -28,7 +30,24 @@ impl QuatIndex {
         self.primary_map.get(&key).copied()
     }
 
-    /// Izračunava koliko se 2-bitnih kvatova u bloku potpuno poklapa sa ciljanom maskom
+    pub fn update_presence(&mut self, chunk: u64) {
+        let mut mask = 0u8;
+        for i in 0..32 {
+            let val = (chunk >> (i * 2)) & 0b11;
+            mask |= 1 << val;
+        }
+        self.presence_filter.push(mask);
+    }
+
+    #[inline(always)]
+    pub fn has_state(&self, chunk_idx: usize, val: QuatVal) -> bool {
+        if let Some(&mask) = self.presence_filter.get(chunk_idx) {
+            (mask & (1 << (val as u8))) != 0
+        } else {
+            true
+        }
+    }
+
     #[inline(always)]
     pub fn match_quat_mask(chunk: u64, pattern: u64) -> u32 {
         let xnor = !(chunk ^ pattern);
@@ -37,17 +56,24 @@ impl QuatIndex {
         (even_bits & odd_bits).count_ones()
     }
 
-    /// Ekstrakcija jednog kvata sa tačne pozicije (0-31) unutar 64-bitnog bloka
     #[inline(always)]
-    pub fn extract_quat(chunk: u64, quat_idx: usize) -> QuatVal {
-        debug_assert!(quat_idx < 32);
+    pub fn extract_quat(chunk: u64, quat_idx: usize) -> Result<QuatVal> {
+        if quat_idx >= 32 {
+            return Err(QuatDbError::IndexOutOfBounds {
+                chunk_idx: 0,
+                quat_idx,
+            });
+        }
+
         let shift = quat_idx * 2;
         let bits = (chunk >> shift) & 0b11;
+
         match bits {
-            0 => QuatVal::Q0,
-            1 => QuatVal::Q1,
-            2 => QuatVal::Q2,
-            _ => QuatVal::Q3,
+            0 => Ok(QuatVal::Q0),
+            1 => Ok(QuatVal::Q1),
+            2 => Ok(QuatVal::Q2),
+            3 => Ok(QuatVal::Q3),
+            _ => unreachable!(),
         }
     }
 }
