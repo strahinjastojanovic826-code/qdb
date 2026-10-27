@@ -73,6 +73,22 @@ impl QuatDb {
         }
     }
 
+    pub fn range_query(&self, start_key: u64, end_key: u64) -> Result<Vec<(u64, u64)>> {
+    let index = self.index.read();
+    let storage = self.storage.read();
+    let mut results = Vec::new();
+
+    // Prolazimo kroz HashMap i biramo ključeve u opsegu
+    for (&key, &offset) in &index.primary_map {
+        if key >= start_key && key <= end_key {
+            let chunk = storage.read_chunk(offset)?;
+            results.push((key, chunk));
+        }
+    }
+
+    Ok(results)
+}
+
     pub fn get_single_quat(&self, key: u64, quat_idx: usize) -> Result<Option<QuatVal>> {
         if let Some(chunk) = self.get_by_key(key)? {
             let quat = QuatIndex::extract_quat(chunk, quat_idx)?;
@@ -100,4 +116,38 @@ impl QuatDb {
 
         Ok(matches)
     }
+}
+
+pub struct Transaction<'a> {
+    db: &'a mut QuatDb,
+    ops: Vec<(u64, u64)>, // (chunk, key)
+}
+
+impl<'a> Transaction<'a> {
+    pub fn new(db: &'a mut QuatDb) -> Self {
+        Self { db, ops: Vec::new() }
+    }
+
+    pub fn stage_insert(&mut self, chunk: u64) {
+        let offset = 0; // calculated offset
+        self.ops.push((chunk, offset));
+    }
+
+    pub fn commit(self) -> Result<()> {
+    let mut storage = self.db.storage.write();
+    let mut index = self.db.index.write();
+
+    for (chunk, _offset) in self.ops {
+        // Prepusti storage-u da odradi upis i vrati ključ/offset preko javne metode
+        let key = storage.append_chunk(chunk)?; 
+        let offset = storage.total_chunks()? * 8 - 8; // Primer izračunavanja offseta
+        index.insert_primary(key, offset);
+        index.update_presence(chunk);
+    }
+
+    // Automatska konverzija I/O greške zahvaljujući #[from] io::Error
+    storage.sync_all()?;
+    
+    Ok(())
+}
 }

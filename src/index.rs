@@ -39,6 +39,17 @@ impl QuatIndex {
         self.presence_filter.push(mask);
     }
 
+    pub fn match_quat_mask_optimized(chunks: &[u64], pattern: u64, results: &mut [u32]) {
+    // LLVM automatski vektorizuje ovu petlju ako je napisana linearno i bez nuspojava
+    for (i, &chunk) in chunks.iter().enumerate() {
+        let xnor = !(chunk ^ pattern);
+        let even_bits = xnor & 0x5555_5555_5555_5555;
+        let (odd_bits, _) = xnor.overflowing_shr(1);
+        let combined = even_bits & (odd_bits & 0x5555_5555_5555_5555);
+        results[i] = combined.count_ones();
+    }
+}
+
     #[inline(always)]
     pub fn has_state(&self, chunk_idx: usize, val: QuatVal) -> bool {
         if let Some(&mask) = self.presence_filter.get(chunk_idx) {
@@ -75,5 +86,33 @@ impl QuatIndex {
             3 => Ok(QuatVal::Q3),
             _ => unreachable!(),
         }
+    }
+}
+
+use std::fs::File;
+
+const BTREE_ORDER: usize = 64;
+
+#[derive(Clone, Debug)]
+pub struct BTreeNode {
+    pub is_leaf: bool,
+    pub keys: Vec<u64>,
+    pub values: Vec<u64>, // Offseti u primarnom fajlu
+    pub children: Vec<u64>, // Pozicije pod-čvorova u fajlu indeksa
+}
+
+pub struct DiskBTreeIndex {
+    file: File,
+    root_offset: u64,
+}
+
+impl DiskBTreeIndex {
+    pub fn new(file: File) -> Self {
+        Self { file, root_offset: 0 }
+    }
+
+    pub fn search(&mut self, _key: u64) -> Result<Option<u64>> {
+        // Implement disk-based node traversal here
+        Ok(None)
     }
 }

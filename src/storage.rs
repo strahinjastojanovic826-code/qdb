@@ -51,6 +51,12 @@ impl QuatStorage {
         Ok(())
     }
 
+    pub fn sync_all(&mut self) -> std::io::Result<()> {
+        self.wal_file.sync_all()?;
+        self.file.sync_all()?;
+        Ok(())
+    }
+
     /// Appends chunk to WAL with strict sync_all(), then writes to primary disk
     pub fn append_chunk(&mut self, chunk: u64) -> Result<u64> {
         let bytes = chunk.to_le_bytes();

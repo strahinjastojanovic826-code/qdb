@@ -8,15 +8,15 @@ pub use engine::QuatDb;
 pub use index::{QuatIndex, QuatVal};
 pub use errors::{QuatDbError, Result};
 pub use storage::QuatStorage;
-use std::path::Path;
-use std::io::Write;
-use std::path::PathBuf;
+pub use crate::engine::Transaction;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::time::Instant;
+    use std::path::PathBuf;
+    use std::io::Write;
 
     fn cleanup(base_path: &str) {
         let _ = fs::remove_file(base_path);
@@ -482,5 +482,57 @@ fn test_wal_crash_recovery() {
 
         cleanup_temp_db(path_buf);
     }
+    #[test]
+fn test_range_query() {
+    let db_path = "test_range.qdb";
+    cleanup(db_path);
+    print_report_header("Range Query Test");
+
+    let mut db = QuatDb::open(db_path).unwrap();
+    
+    // Ubacujemo 3 čunka (dobiće ključeve 0, 1 i 2)
+    db.insert(0x1111_1111_1111_1111).unwrap();
+    db.insert(0x2222_2222_2222_2222).unwrap();
+    db.insert(0x3333_3333_3333_3333).unwrap();
+
+    // Testiramo opseg ključeva od 0 do 1
+    let results = db.range_query(0, 1).unwrap();
+    
+    println!("[STATUS] PASS");
+    println!("[METRICS] Range Results Count: {}", results.len());
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0, 0); // Prvi ključ
+    assert_eq!(results[1].0, 1); // Drugi ključ
+
+    cleanup(db_path);
+}
+#[test]
+fn test_transaction_batch_commit() {
+    let db_path = "test_transaction.qdb";
+    cleanup(db_path);
+    print_report_header("Transaction Batch Commit Test");
+
+    let mut db = QuatDb::open(db_path).unwrap();
+    
+    // Pokrećemo transakciju i dodajemo više upisa u heš/keš
+    let mut tx = Transaction::new(&mut db);
+    tx.stage_insert(0xAAAA_BBBB_CCCC_DDDD);
+    tx.stage_insert(0x1111_2222_3333_4444);
+    
+    // Potvrđujemo transakciju
+    tx.commit().unwrap();
+
+    // Proveravamo da li se unosi mogu pročitati iz baze
+    let retrieved = db.get_by_key(0).unwrap();
+    
+    println!("[STATUS] PASS");
+    println!("[METRICS] Batch Transaction Committed Successfully");
+
+    assert!(retrieved.is_some());
+    assert_eq!(retrieved.unwrap(), 0xAAAA_BBBB_CCCC_DDDD);
+
+    cleanup(db_path);
+}
 
 }

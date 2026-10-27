@@ -1,11 +1,11 @@
 [package]
 name = "quat_db"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 authors = ["Strale <strahinjastojanovic826@gmail.com>"]
 description = "High-performance 4-state (2-bit quat) embedded database engine"
 readme = "README.md"
-license = "AGPL-3.0-or-later"
+license = "AGPL-3.0-only"
 repository = "https://github.com/strahinjastojanovic826-code/qdb"
 keywords = ["quat", "database", "bit-packing", "no-deps", "storage"]
 categories = ["database-implementations", "data-structures"]

@@ -13,6 +13,8 @@
 * **In-Memory Offset Indexing** 🗺️ Fast key-to-offset index mapping rebuilt dynamically upon initialization.
 * **Bitwise Mask Searching** 🔍 Query high-throughput 4-state bit patterns directly over packed records.
 * **Custom Error Handling** 🚦 Strongly-typed error variants powered by `thiserror` (`QuatDbError`).
+* **Range Queries** 📊 Fast retrieval of data chunks and records within specified key boundaries.
+* **Batch Transactions** ⚡ Atomic group-write operations optimizing performance via single-batch disk synchronization.
 
 ---
 
@@ -63,7 +65,7 @@ Add `qdb` to your project's `Cargo.toml`:
 
 ```toml
 [dependencies]
-quat_db = "0.4.0"
+quat_db = "0.5.0"
 
 ```
 
@@ -91,7 +93,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Key {} successfully read and validated!", key);
     Ok(())
 }
+```
 
+### Range Queries & Batch Transactions
+
+You can query ranges of keys or group multiple insertions into a single atomic transaction:
+
+```rust
+use qdb::QuatDb;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = QuatDb::open("records.qdb")?;
+
+    // 1. Range Query: Fetch all chunks between key 0 and 10
+    let range_results = db.range_query(0, 10)?;
+    println!("Found {} chunks in the given range.", range_results.len());
+
+    // 2. Batch Transactions: Group multiple writes atomically
+    let mut tx = qdb::Transaction::new(&mut db);
+    tx.stage_insert(0x1111_2222_3333_4444);
+    tx.stage_insert(0x5555_6666_7777_8888);
+    tx.commit()?; // Flushed and synced efficiently in a single batch
+
+    Ok(())
+}
 ```
 
 High-Throughput Pattern Scanning

@@ -45,7 +45,7 @@ pub struct QuatDbHandle {
 pub unsafe extern "C" fn quat_db_open(
     path: *const c_char,
     out_handle: *mut *mut QuatDbHandle,
-) -> QuatErrorCode {
+) -> QuatErrorCode { unsafe {
     if path.is_null() || out_handle.is_null() {
         return QuatErrorCode::NullPointer;
     }
@@ -70,17 +70,17 @@ pub unsafe extern "C" fn quat_db_open(
     }));
 
     result.unwrap_or(QuatErrorCode::Panic)
-}
+}}
 
 /// Zatvara bazu i oslobađa resurse.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn quat_db_close(handle: *mut QuatDbHandle) {
+pub unsafe extern "C" fn quat_db_close(handle: *mut QuatDbHandle) { unsafe {
     if !handle.is_null() {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             drop(Box::from_raw(handle));
         }));
     }
-}
+}}
 
 /// Ubacuje chunk u bazu (zaključava bazu za pisanje).
 #[unsafe(no_mangle)]
@@ -88,14 +88,14 @@ pub unsafe extern "C" fn quat_db_insert(
     handle: *mut QuatDbHandle,
     chunk: u64,
     out_key: *mut u64,
-) -> QuatErrorCode {
+) -> QuatErrorCode { unsafe {
     if handle.is_null() {
         return QuatErrorCode::NullPointer;
     }
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let handle_ref = &*handle;
-        let mut db_guard = match handle_ref.db.write() {
+        let db_guard = match handle_ref.db.write() {
             Ok(guard) => guard,
             Err(_) => return QuatErrorCode::LockPoisoned,
         };
@@ -112,7 +112,7 @@ pub unsafe extern "C" fn quat_db_insert(
     }));
 
     result.unwrap_or(QuatErrorCode::Panic)
-}
+}}
 
 /// Dohvata chunk po ključu (zaključava bazu za čitanje).
 #[unsafe(no_mangle)]
@@ -120,7 +120,7 @@ pub unsafe extern "C" fn quat_db_get_by_key(
     handle: *const QuatDbHandle,
     key: u64,
     out_chunk: *mut u64,
-) -> QuatErrorCode {
+) -> QuatErrorCode { unsafe {
     if handle.is_null() || out_chunk.is_null() {
         return QuatErrorCode::NullPointer;
     }
@@ -143,7 +143,7 @@ pub unsafe extern "C" fn quat_db_get_by_key(
     }));
 
     result.unwrap_or(QuatErrorCode::Panic)
-}
+}}
 
 /// Dohvata pojedinačni quat po ključu i indeksu.
 #[unsafe(no_mangle)]
@@ -152,7 +152,7 @@ pub unsafe extern "C" fn quat_db_get_single_quat(
     key: u64,
     quat_idx: usize,
     out_val: *mut u8,
-) -> QuatErrorCode {
+) -> QuatErrorCode { unsafe {
     if handle.is_null() || out_val.is_null() {
         return QuatErrorCode::NullPointer;
     }
@@ -175,7 +175,7 @@ pub unsafe extern "C" fn quat_db_get_single_quat(
     }));
 
     result.unwrap_or(QuatErrorCode::Panic)
-}
+}}
 
 /// Pretražuje uzorke i vraća alocirani niz ključeva.
 #[unsafe(no_mangle)]
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn quat_db_query_pattern(
     min_matches: u32,
     out_keys: *mut *mut u64,
     out_len: *mut usize,
-) -> QuatErrorCode {
+) -> QuatErrorCode { unsafe {
     if handle.is_null() || out_keys.is_null() || out_len.is_null() {
         return QuatErrorCode::NullPointer;
     }
@@ -210,14 +210,14 @@ pub unsafe extern "C" fn quat_db_query_pattern(
     }));
 
     result.unwrap_or(QuatErrorCode::Panic)
-}
+}}
 
 /// Oslobađa memoriju alociranu u `quat_db_query_pattern`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn quat_db_free_keys(keys: *mut u64, len: usize) {
+pub unsafe extern "C" fn quat_db_free_keys(keys: *mut u64, len: usize) { unsafe {
     if !keys.is_null() && len > 0 {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             let _ = Box::from_raw(std::slice::from_raw_parts_mut(keys, len));
         }));
     }
-}
+}}
