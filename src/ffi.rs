@@ -6,6 +6,7 @@ use std::sync::RwLock;
 
 use crate::engine::QuatDb;
 use crate::errors::QuatDbError;
+use crate::genomics::pack_dna_sequence;
 
 /// Kodovi statusa/grešaka za C-ABI granicu
 #[repr(C)]
@@ -219,5 +220,46 @@ pub unsafe extern "C" fn quat_db_free_keys(keys: *mut u64, len: usize) { unsafe 
         let _ = catch_unwind(AssertUnwindSafe(|| {
             let _ = Box::from_raw(std::slice::from_raw_parts_mut(keys, len));
         }));
+    }
+}}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn quat_db_insert_dna(
+    handle: *mut QuatDbHandle,
+    dna_str: *const c_char,
+    out_key: *mut u64,
+) -> QuatErrorCode { unsafe {
+    if handle.is_null() || dna_str.is_null() || out_key.is_null() {
+        return QuatErrorCode::NullPointer;
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let c_str = CStr::from_ptr(dna_str);
+        let str_slice = c_str.to_str().map_err(|_| QuatErrorCode::InvalidString)?;
+        
+        // Pack DNA string into a quaternary u64 chunk
+        let chunk = pack_dna_sequence(str_slice).map_err(|_| QuatErrorCode::InvalidOffset)?;
+
+        let db_handle = &mut *handle;
+        let _db_guard = db_handle.db.write();
+        
+        // Insert chunk into storage and index
+       let db_guard = db_handle.db.write().unwrap(); // Dodato .unwrap() da otključa RwLock
+
+       let mut storage_guard = db_guard.storage.write(); // Otključavamo storage katanac
+       let mut index_guard = db_guard.index.write();     // Otključavamo index katanac
+
+       let key = storage_guard.append_chunk(chunk).map_err(|_| QuatErrorCode::IoError)?;
+        index_guard.insert_primary(key, key);
+        index_guard.update_presence(chunk);
+
+        *out_key = key;
+        Ok::<(), QuatErrorCode>(())
+    }));
+
+    match result {
+        Ok(Ok(())) => QuatErrorCode::Ok,
+        Ok(Err(code)) => code,
+        Err(_) => QuatErrorCode::Panic,
     }
 }}

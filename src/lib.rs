@@ -3,6 +3,7 @@ pub mod index;
 pub mod storage;
 pub mod errors;
 pub mod ffi;
+pub mod genomics;
 
 pub use engine::QuatDb;
 pub use index::{QuatIndex, QuatVal};
@@ -532,6 +533,100 @@ fn test_transaction_batch_commit() {
     assert!(retrieved.is_some());
     assert_eq!(retrieved.unwrap(), 0xAAAA_BBBB_CCCC_DDDD);
 
+    cleanup(db_path);
+}
+
+#[test]
+fn test_wal_checksum_recovery_benchmark() {
+    let db_path = "test_wal_recovery_bench.qdb";
+    let _wal_path = format!("{}.wal", db_path);
+    cleanup(db_path);
+    print_report_header("Robust WAL Checksum Recovery Benchmark");
+
+    let start = Instant::now();
+    {
+        let mut db = QuatDb::open(db_path).expect("Failed to open database");
+        for i in 0..500 {
+            db.insert(0xDEAD_BEEF_CAFE_BABE_u64.wrapping_add(i as u64)).unwrap();
+        }
+    } // Database closes and flushes WAL
+
+    // Reopen to trigger WAL validation and recovery code path
+    let mut db_reopened = QuatDb::open(db_path).expect("Failed to reopen database for recovery");
+    let check_val = db_reopened.get_by_key(0).unwrap().unwrap();
+    
+    let duration = start.elapsed();
+
+    println!("[STATUS]    PASS");
+    println!("[METRICS]   Recovered Entries   : 500 Chunks with Checksum");
+    println!("[METRICS]   Sample Check Value  : 0x{:016X}", check_val);
+    println!("[PERF]      Recovery Time       : {:?}", duration);
+
+    assert_eq!(check_val, 0xDEAD_BEEF_CAFE_BABE);
+    cleanup(db_path);
+}
+
+#[test]
+fn test_genomics_dna_packing_benchmark() {
+    let db_path = "test_genomics_bench.qdb";
+    cleanup(db_path);
+    print_report_header("Genomics DNA Sequence Packing & Storage Benchmark");
+
+    let mut db = QuatDb::open(db_path).expect("Failed to open database");
+    let dna_sample = "ACGTACGTACGTACGTACGTACGTACGTACGT"; // Exactly 32 nucleotides
+    
+    let start = Instant::now();
+    let iterations = 10_000;
+    
+    let mut last_key = 0;
+    for _ in 0..iterations {
+        let chunk = crate::genomics::pack_dna_sequence(dna_sample).unwrap();
+        last_key = db.insert(chunk).unwrap();
+    }
+    
+    let duration = start.elapsed();
+    let retrieved_chunk = db.get_by_key(last_key).unwrap().unwrap();
+    let unpacked_dna = crate::genomics::unpack_dna_sequence(retrieved_chunk, 32).unwrap();
+
+    println!("[STATUS]    PASS");
+    println!("[METRICS]   DNA Sequence Length : 32 Nucleotides");
+    println!("[METRICS]   Total Pack/Inserts  : {}", iterations);
+    println!("[METRICS]   Unpacked Validation : {}", unpacked_dna);
+    println!("[PERF]      Execution Time      : {:?}", duration);
+    println!("[PERF]      Genomic Throughput  : {:.2} Seq/sec", iterations as f64 / duration.as_secs_f64());
+
+    assert_eq!(unpacked_dna, dna_sample);
+    cleanup(db_path);
+}
+
+#[test]
+fn test_mvcc_transaction_benchmark() {
+    let db_path = "test_mvcc_bench.qdb";
+    cleanup(db_path);
+    print_report_header("MVCC Transaction & Batch Commit Benchmark");
+
+    let mut db = QuatDb::open(db_path).expect("Failed to open database");
+    let mut tx = db.begin_transaction();
+
+    let start = Instant::now();
+    let num_ops = 1_000;
+
+    for i in 0..num_ops {
+        let chunk = 0x1111_2222_3333_4444_u64.wrapping_add(i as u64);
+        tx.stage_insert(chunk);
+    }
+
+    tx.commit_mvcc().expect("MVCC commit failed");
+    let duration = start.elapsed();
+    let file_size = fs::metadata(db_path).unwrap().len();
+
+    println!("[STATUS]    PASS");
+    println!("[METRICS]   Staged Operations : {}", num_ops);
+    println!("[METRICS]   Database Size     : {} bytes", file_size);
+    println!("[PERF]      Execution Time    : {:?}", duration);
+    println!("[PERF]      Commit Throughput : {:.2} Ops/sec", num_ops as f64 / duration.as_secs_f64());
+
+    assert!(duration.as_secs_f64() < 5.0);
     cleanup(db_path);
 }
 

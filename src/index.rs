@@ -96,9 +96,10 @@ const BTREE_ORDER: usize = 64;
 #[derive(Clone, Debug)]
 pub struct BTreeNode {
     pub is_leaf: bool,
-    pub keys: Vec<u64>,
-    pub values: Vec<u64>, // Offseti u primarnom fajlu
-    pub children: Vec<u64>, // Pozicije pod-čvorova u fajlu indeksa
+    pub num_keys: u16,
+    pub keys: [u64; BTREE_ORDER],
+    pub values: [u64; BTREE_ORDER], // Offsets in primary storage or child node offsets
+    pub children: [u64; BTREE_ORDER + 1],
 }
 
 pub struct DiskBTreeIndex {
@@ -115,4 +116,22 @@ impl DiskBTreeIndex {
         // Implement disk-based node traversal here
         Ok(None)
     }
+
+    pub fn search_disk(&mut self, _key: u64) -> Result<Option<u64>> {
+        let current_offset = self.root_offset;
+        
+        if current_offset == 0 && self.file.metadata()?.len() == 0 {
+            return Ok(None);
+        }
+
+        // Simplified traversal loop for B-Tree on disk
+        // In a full implementation, you read BTreeNode from `self.file` at `current_offset`
+        Ok(None)
+    }
+
+    pub fn insert_disk(&mut self, _key: u64, _value: u64) -> Result<()> {
+        // Disk-based split and insert logic goes here
+        Ok(())
+    }
+
 }

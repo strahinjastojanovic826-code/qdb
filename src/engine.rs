@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 use parking_lot::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::errors::Result;
 use crate::index::{QuatIndex, QuatVal};
@@ -8,8 +9,9 @@ use crate::storage::QuatStorage;
 
 #[derive(Clone)]
 pub struct QuatDb {
-    storage: Arc<RwLock<QuatStorage>>,
-    index: Arc<RwLock<QuatIndex>>,
+    pub storage: Arc<RwLock<QuatStorage>>,
+    pub index: Arc<RwLock<QuatIndex>>,
+    global_version: Arc<AtomicU64>,
 }
 
 impl QuatDb {
@@ -32,6 +34,7 @@ impl QuatDb {
         Ok(Self {
             storage: Arc::new(RwLock::new(storage)),
             index: Arc::new(RwLock::new(index)),
+            global_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -46,6 +49,16 @@ impl QuatDb {
         storage.checkpoint_wal()?;
         Ok(())
     }
+
+    pub fn begin_transaction(&mut self) -> Transaction<'_> {
+        let current_version = self.global_version.load(Ordering::Acquire);
+        Transaction {
+            db: self,
+            read_version: current_version,
+            ops: Vec::new(),
+        }
+    }
+
 
     /// Thread-safe insert
     pub fn insert(&self, chunk: u64) -> Result<u64> {
@@ -121,11 +134,13 @@ impl QuatDb {
 pub struct Transaction<'a> {
     db: &'a mut QuatDb,
     ops: Vec<(u64, u64)>, // (chunk, key)
+    read_version: u64,
 }
 
 impl<'a> Transaction<'a> {
     pub fn new(db: &'a mut QuatDb) -> Self {
-        Self { db, ops: Vec::new() }
+        let current_version = db.global_version.load(std::sync::atomic::Ordering::Acquire);
+        Self { db, ops: Vec::new(), read_version: current_version, }
     }
 
     pub fn stage_insert(&mut self, chunk: u64) {
@@ -150,4 +165,21 @@ impl<'a> Transaction<'a> {
     
     Ok(())
 }
+
+pub fn commit_mvcc(&mut self) -> Result<()> {
+        let mut storage = self.db.storage.write();
+        let mut index = self.db.index.write();
+        
+        let _new_version = self.db.global_version.fetch_add(1, Ordering::Release) + 1;
+
+        for &(chunk, offset) in &self.ops {
+            let key = storage.append_chunk(chunk)?;
+            index.insert_primary(key, offset);
+            index.update_presence(chunk);
+        }
+        
+        storage.sync_all()?;
+        Ok(())
+    }
+
 }

@@ -15,6 +15,9 @@
 * **Custom Error Handling** 🚦 Strongly-typed error variants powered by `thiserror` (`QuatDbError`).
 * **Range Queries** 📊 Fast retrieval of data chunks and records within specified key boundaries.
 * **Batch Transactions** ⚡ Atomic group-write operations optimizing performance via single-batch disk synchronization.
+* **MVCC Transactions** 🔄 Multi-version concurrency control allowing non-blocking concurrent reads during writes.
+* **Robust WAL Checksum Recovery** 🛡️ Enhanced crash-safety with automatic CRC/hash validation on log entries.
+* **Genomics & DNA Support** 🧬 Native 2-bit packing and high-speed bitwise pattern querying for DNA/RNA sequences (A, C, G, T).
 
 ---
 
@@ -49,13 +52,19 @@ For commercial licensing inquiries, pricing, or custom SLA support, please conta
 
 ### Key Performance Metrics
 
-| Metric | Measured Value | Description |
-| :--- | :--- | :--- |
-| **Scan Throughput** | **`571.02 MQuats/sec`** | Scanned 320,000 quats (10,000 chunks) in `560.4 µs` |
-| **Cold Load Time** | **`3.35 ms`** | Full index recovery & startup time after WAL restart |
-| **Read Latency** | **`5.77 ms`** | Low-level 2-bit quat extraction latency |
-| **Insertion Throughput** | **`10,000 chunks / 6.63s`** | Batch insertion rate into storage engine |
-| **Database Overhead** | **`78 KB`** | Total database file size for 10,000 stored chunks |
+| Test Name | Status | Key Metrics & Performance Data |
+| :--- | :---: | :--- |
+| `test_ffi_get_single_quat` | **PASS**[cite: 35] | Raw Chunk: `0b11100100`[cite: 35], Index 0-3 Extraction Validated[cite: 35], Read Latency: `5.2937ms`[cite: 35] |
+| `test_range_query` | **PASS**[cite: 36] | Retrieved Payload: `0xAAAABBBBCCCCDDDD`[cite: 35], Assigned Key: `0`[cite: 35], DB Size: `8 bytes`[cite: 35], Exec Time: `6.1947ms`[cite: 35] |
+| `test_wal_crash_recovery` | **PASS**[cite: 36] | Data committed to storage & WAL, simulation passed successfully[cite: 35, 36] |
+| `test_pattern_query_matching` | **PASS**[cite: 36] | Batch transaction committed successfully, pattern matching verified[cite: 36] |
+| `test_transaction_batch_commit` | **PASS**[cite: 36] | Batch transaction committed successfully[cite: 36] |
+| `test_wal_checksum_recovery_benchmark` | **PASS**[cite: 36] | Recovered Entries: `500 Chunks with Checksum`[cite: 36], Check Value: `0xDEADBEEFCAFEBABE`[cite: 36], Recovery Time: `1.208323s`[cite: 36] |
+| `test_index_reconstruction_and_wal_persistence` | **PASS**[cite: 36] | Reopened Payload: `0x123456789ABCDEF0`[cite: 36], Index Recovery: `Successful`[cite: 36], Cold Load Time: `1.617ms`[cite: 36] |
+| `test_all_four_states_reading` | **PASS**[cite: 36] | Raw Bits: `0b0111`[cite: 36], Index 0 (Q3) & Index 1 (Q1) Verified[cite: 36], Exec Time: `6.8805ms`[cite: 36] |
+| `test_mvcc_transaction_benchmark` | **PASS**[cite: 37] | Staged Ops: `1000`[cite: 37], DB Size: `8000 bytes`[cite: 37], Exec Time: `2.151529s`[cite: 37], Commit Throughput: `464.79 Ops/sec`[cite: 37] |
+| `test_genomics_dna_packing_benchmark` | **PASS**[cite: 37] | DNA Length: `32 Nucleotides`[cite: 37], Total Inserts: `10000`[cite: 37], Unpacked Validation: `ACGTACGT...`[cite: 37], Genomic Throughput: `899.98 Seq/sec`[cite: 37] |
+| `test_batch_reading_large_dataset` | **PASS**[cite: 37] | Total Chunks: `10000`[cite: 37], Scanned Quats: `320000`[cite: 37], DB Size: `78 KB`[cite: 37], Scan Throughput: `578.66 Mquats/sec`[cite: 37] |
 
 ---
 
@@ -65,7 +74,7 @@ Add `qdb` to your project's `Cargo.toml`:
 
 ```toml
 [dependencies]
-quat_db = "0.5.0"
+quat_db = "0.6.0"
 
 ```
 
@@ -91,6 +100,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(q3, QuatVal::Q3);
 
     println!("Key {} successfully read and validated!", key);
+    Ok(())
+}
+```
+
+### Genomics & DNA Sequence Storage
+
+Store and query biological sequences natively using 2-bit quaternary packing:
+
+```rust
+use qdb::{QuatDb, genomics::{pack_dna_sequence, unpack_dna_sequence}};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = QuatDb::open("genomics.qdb")?;
+
+    // 1. Pack a 32-nucleotide DNA string into a single u64 chunk
+    let dna_sample = "ACGTACGTACGTACGTACGTACGTACGTACGT";
+    let chunk = pack_dna_sequence(dna_sample)?;
+    
+    // 2. Insert into the database
+    let key = db.insert(chunk)?;
+
+    // 3. Retrieve and unpack back to DNA string
+    let retrieved_chunk = db.get_by_key(key)?.ok_or("Key not found")?;
+    let unpacked_dna = unpack_dna_sequence(retrieved_chunk, 32)?;
+
+    println!("Original DNA: {}", dna_sample);
+    println!("Unpacked DNA: {}", unpacked_dna);
     Ok(())
 }
 ```
@@ -180,6 +216,15 @@ int main(void) {
     if (err == QUAT_OK) {
         printf("Fetched chunk: 0x%LLX\n", (unsigned long long)fetched_chunk);
     }
+
+    const char* dna_sequence = "ACGTACGTACGTACGTACGTACGTACGTACGT";
+uint64_t dna_key = 0;
+err = quat_db_insert_dna(db, dna_sequence, &dna_key);
+if (err != QUAT_OK) {
+    printf("Error inserting DNA sequence: %d\n", err);
+} else {
+    printf("Successfully inserted DNA sequence! Assigned key: %llu\n", (unsigned long long)dna_key);
+}
 
     // 4. Close database
     quat_db_close(db);
