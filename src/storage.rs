@@ -9,6 +9,10 @@ use std::io::Read;
 use crate::errors::{QuatDbError, Result};
 
 pub const DEFAULT_PAGE_SIZE: usize = 4096;
+pub const QUAT_DB_MAGIC: &[u8; 4] = b"QTDB";
+pub const QUAT_WAL_MAGIC: &[u8; 4] = b"QWAL";
+pub const BINARY_FORMAT_VERSION: u16 = 1;
+pub const HEADER_SIZE: usize = 8; // 4 bytes magic + 2 bytes version + 2 bytes reserved
 
 pub struct QuatStorage {
     file: File,
@@ -46,6 +50,9 @@ impl QuatStorage {
     pub fn reload_mmap(&mut self) -> Result<()> {
         let len = self.file.metadata()?.len();
         if len > 0 {
+            // SAFETY: `&self.file` is open and valid with a non-zero length (`len > 0`),
+            // and callers coordinate mutations/resizes so concurrent modifications do
+            // not cause undefined behavior over the mapped region.
             let mmap = unsafe { Mmap::map(&self.file)? };
             self.mmap = Some(mmap);
         } else {
@@ -159,4 +166,67 @@ impl QuatStorage {
         self.wal_file.sync_all()?;
         Ok(())
     }
+
+    /// Deterministic 32-bit FNV-1a checksum for durable binary records and headers.
+    pub fn checksum_fnv1a(data: &[u8]) -> u32 {
+        let mut hash: u32 = 0x811c_9dc5;
+        for &byte in data {
+            hash ^= byte as u32;
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+        hash
+    }
+
+    /// Writes a versioned binary header if the file is empty, or validates it if non-empty.
+    pub fn write_or_validate_header(file: &mut File, expected_magic: &[u8; 4]) -> Result<()> {
+        let len = file.metadata()?.len();
+        if len == 0 {
+            let mut header = [0u8; HEADER_SIZE];
+            header[0..4].copy_from_slice(expected_magic);
+            header[4..6].copy_from_slice(&BINARY_FORMAT_VERSION.to_le_bytes());
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(&header)?;
+            file.sync_all()?;
+            return Ok(());
+        }
+
+        if (len as usize) < HEADER_SIZE {
+            return Err(crate::errors::QuatDbError::CorruptedWal);
+        }
+
+        let mut header = [0u8; HEADER_SIZE];
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut header)?;
+
+        if &header[0..4] != expected_magic {
+            return Err(crate::errors::QuatDbError::CorruptedWal);
+        }
+
+        let version = u16::from_le_bytes([header[4], header[5]]);
+        if version != BINARY_FORMAT_VERSION {
+            return Err(crate::errors::QuatDbError::UnsupportedVersion(version));
+        }
+
+        Ok(())
+    }
+
+    /// Appends a WAL record with deterministic checksum:
+    /// [chunk: 8B][offset: 8B][checksum: 4B] = 20 bytes.
+    pub fn append_wal_versioned(&mut self, chunk: u64, offset: u64) -> Result<()> {
+        let mut payload = [0u8; 16];
+        payload[0..8].copy_from_slice(&chunk.to_le_bytes());
+        payload[8..16].copy_from_slice(&offset.to_le_bytes());
+
+        let crc = Self::checksum_fnv1a(&payload);
+
+        let mut record = [0u8; 20];
+        record[0..16].copy_from_slice(&payload);
+        record[16..20].copy_from_slice(&crc.to_le_bytes());
+
+        self.wal_file.seek(SeekFrom::End(0))?;
+        self.wal_file.write_all(&record)?;
+        self.wal_file.sync_all()?;
+        Ok(())
+    }
+    
 }

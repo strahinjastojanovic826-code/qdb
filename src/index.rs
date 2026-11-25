@@ -87,6 +87,99 @@ impl QuatIndex {
             _ => unreachable!(),
         }
     }
+
+    /// Bitwise quaternary AND across all 32 quats in two packed u64 chunks.
+    /// Produces `0b11` (Q3) at quat `i` iff both `a` and `b` have `0b11` at quat `i`.
+    #[inline(always)]
+    pub fn quat_and(a: u64, b: u64) -> u64 {
+        let a_lo = a & 0x5555_5555_5555_5555;
+        let a_hi = (a >> 1) & 0x5555_5555_5555_5555;
+        let b_lo = b & 0x5555_5555_5555_5555;
+        let b_hi = (b >> 1) & 0x5555_5555_5555_5555;
+
+        let out_lo = a_lo & b_lo;
+        let out_hi = a_hi & b_hi;
+        (out_hi << 1) | out_lo
+    }
+
+    /// Bitwise quaternary OR across all 32 quats in two packed u64 chunks.
+    /// Combines bit planes so any set bit in `a` or `b` is preserved per lane.
+    #[inline(always)]
+    pub fn quat_or(a: u64, b: u64) -> u64 {
+        a | b
+    }
+
+    /// Bitwise quaternary XOR across all 32 quats in two packed u64 chunks.
+    /// Useful for detecting differing quaternary states at each position.
+    #[inline(always)]
+    pub fn quat_xor(a: u64, b: u64) -> u64 {
+        a ^ b
+    }
+
+    /// Searches a single u64 chunk (32 quats) using per-position allowed-state bitmasks.
+    /// `allowed_per_pos[pos]` is a 4-bit mask where bit `q` (0..=3) means `QuatVal` `q` is allowed.
+    /// Returns a 32-bit hit mask where bit `pos` is set if all positions in `[pos..pos + pattern_len)` match.
+    pub fn find_wildcard_pattern(chunk: u64, allowed_per_pos: &[u8], pattern_len: usize) -> u32 {
+        if pattern_len == 0 || pattern_len > 32 || allowed_per_pos.len() < pattern_len {
+            return 0;
+        }
+
+        let mut hit_mask: u32 = 0;
+        let max_start = 32 - pattern_len;
+
+        for start in 0..=max_start {
+            let mut matched = true;
+            for offset in 0..pattern_len {
+                let pos = start + offset;
+                let quat = ((chunk >> (pos * 2)) & 0b11) as u8;
+                let allowed = allowed_per_pos[offset];
+                if (allowed & (1u8 << quat)) == 0 {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                hit_mask |= 1u32 << start;
+            }
+        }
+
+        hit_mask
+    }
+
+    /// Searches for an exact sub-sequence of `sub_len` quats (1..=16) crossing from `chunk_a` into `chunk_b`.
+    /// `target_packed` holds the `sub_len` quats packed in the lowest `2 * sub_len` bits.
+    /// Returns the starting quat index in `chunk_a` (0..32) if found across the boundary.
+    pub fn find_cross_chunk_match(
+        chunk_a: u64,
+        chunk_b: u64,
+        target_packed: u64,
+        sub_len: usize,
+    ) -> Option<usize> {
+        if sub_len == 0 || sub_len > 16 {
+            return None;
+        }
+
+        let combined: u128 = ((chunk_b as u128) << 64) | (chunk_a as u128);
+        let lane_mask: u128 = if sub_len == 64 {
+            u128::MAX
+        } else {
+            (1u128 << (sub_len * 2)) - 1
+        };
+        let target: u128 = (target_packed as u128) & lane_mask;
+
+        // Only check starts that actually cross the 32-quat boundary of `chunk_a`
+        let min_start = 32usize.saturating_sub(sub_len - 1);
+        for start in min_start..32 {
+            let shift = start * 2;
+            let window = (combined >> shift) & lane_mask;
+            if window == target {
+                return Some(start);
+            }
+        }
+
+        None
+    }
+    
 }
 
 use std::fs::File;

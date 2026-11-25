@@ -18,6 +18,12 @@
 * **MVCC Transactions** 🔄 Multi-version concurrency control allowing non-blocking concurrent reads during writes.
 * **Robust WAL Checksum Recovery** 🛡️ Enhanced crash-safety with automatic CRC/hash validation on log entries.
 * **Genomics & DNA Support** 🧬 Native 2-bit packing and high-speed bitwise pattern querying for DNA/RNA sequences (A, C, G, T).
+* **Quaternary Bitwise Logic** — Parallel 2-bit `AND`, `OR`, and `XOR` operations across all 32 packed quaternary states inside a single `u64` chunk.
+* **Wildcard & Cross-Chunk Pattern Search** — Position-level allowed-state bitmasks (`Q0..Q3`) and sub-sequence matching across adjacent `u64` chunk boundaries.
+* **Batch API & Vectorized Scans** — High-throughput `insert_batch`, `get_batch`, and multi-pattern `query_pattern_batch` over memory-mapped slices.
+* **Transaction Rollback & Conflict Handling** — Explicit staged rollback (`rollback`) and version conflict reporting (`MvccConflict`) for transactional writes.
+* **Versioned Binary Headers & Checksums** — Magic-byte and version-validated file/WAL headers (`UnsupportedVersion`) paired with deterministic FNV-1a checksums.
+* **Structured Logging & Metrics** — Atomic runtime counters (`DbMetrics`) and key-value diagnostic logging for observability.
 
 ---
 
@@ -52,19 +58,17 @@ For commercial licensing inquiries, pricing, or custom SLA support, please conta
 
 ### Key Performance Metrics
 
-| Test Name | Status | Key Metrics & Performance Data |
-| :--- | :---: | :--- |
-| `test_ffi_get_single_quat` | **PASS**[cite: 35] | Raw Chunk: `0b11100100`[cite: 35], Index 0-3 Extraction Validated[cite: 35], Read Latency: `5.2937ms`[cite: 35] |
-| `test_range_query` | **PASS**[cite: 36] | Retrieved Payload: `0xAAAABBBBCCCCDDDD`[cite: 35], Assigned Key: `0`[cite: 35], DB Size: `8 bytes`[cite: 35], Exec Time: `6.1947ms`[cite: 35] |
-| `test_wal_crash_recovery` | **PASS**[cite: 36] | Data committed to storage & WAL, simulation passed successfully[cite: 35, 36] |
-| `test_pattern_query_matching` | **PASS**[cite: 36] | Batch transaction committed successfully, pattern matching verified[cite: 36] |
-| `test_transaction_batch_commit` | **PASS**[cite: 36] | Batch transaction committed successfully[cite: 36] |
-| `test_wal_checksum_recovery_benchmark` | **PASS**[cite: 36] | Recovered Entries: `500 Chunks with Checksum`[cite: 36], Check Value: `0xDEADBEEFCAFEBABE`[cite: 36], Recovery Time: `1.208323s`[cite: 36] |
-| `test_index_reconstruction_and_wal_persistence` | **PASS**[cite: 36] | Reopened Payload: `0x123456789ABCDEF0`[cite: 36], Index Recovery: `Successful`[cite: 36], Cold Load Time: `1.617ms`[cite: 36] |
-| `test_all_four_states_reading` | **PASS**[cite: 36] | Raw Bits: `0b0111`[cite: 36], Index 0 (Q3) & Index 1 (Q1) Verified[cite: 36], Exec Time: `6.8805ms`[cite: 36] |
-| `test_mvcc_transaction_benchmark` | **PASS**[cite: 37] | Staged Ops: `1000`[cite: 37], DB Size: `8000 bytes`[cite: 37], Exec Time: `2.151529s`[cite: 37], Commit Throughput: `464.79 Ops/sec`[cite: 37] |
-| `test_genomics_dna_packing_benchmark` | **PASS**[cite: 37] | DNA Length: `32 Nucleotides`[cite: 37], Total Inserts: `10000`[cite: 37], Unpacked Validation: `ACGTACGT...`[cite: 37], Genomic Throughput: `899.98 Seq/sec`[cite: 37] |
-| `test_batch_reading_large_dataset` | **PASS**[cite: 37] | Total Chunks: `10000`[cite: 37], Scanned Quats: `320000`[cite: 37], DB Size: `78 KB`[cite: 37], Scan Throughput: `578.66 Mquats/sec`[cite: 37] |
+| Benchmark / Test Suite | Workload / Scale | Execution Time | Throughput / Key Metric | Output / Artifact Details |
+| :--- | :--- | :--- | :--- | :--- |
+| `test_quaternary_bitwise_ops_benchmark` | 50,000 iterations (4,800,000 quats across `AND` / `OR` / `XOR`) | `673.2µs` | `7,130.12 MQuats/sec` | Bitwise operations over 32 packed 2-bit quats per `u64` |
+| `test_pattern_batch_scan` | 10,000 chunks (320,000 quats scanned) | `569.7µs` (scan) / `13.93s` (insert) | `561.70 MQuats/sec` scan | 5,000 matching chunks; DB size `78 KB` |
+| `test_batch_api_and_pattern_scan_benchmark` | 5,000 chunks batch insert, get & multi-pattern scan | `8.995s` (insert) / `1.358ms` (get) / `458.8µs` (scan) | Sub-millisecond batch scan & ~1.36ms batch read | 2,500 all-`Q3` matches in batch scan |
+| `test_wildcard_and_cross_chunk_pattern_benchmark` | 50,000 iterations (wildcard mask + cross-chunk match) | `61.6448ms` | `811.10 KIter/sec` | 50,000 cross-chunk matches verified |
+| `test_genomics_dna_packing_benchmark` | 10,000 DNA sequences (32 nucleotides each) | `13.946s` | `717.03 Seq/sec` | Full pack, insert, retrieve & unpack round-trip validated |
+| `test_mvcc_transaction_benchmark` | 1,000 staged operations in MVCC transaction | `2.502s` | `399.67 Ops/sec` | DB size `8,000 bytes` |
+| `test_versioned_header_and_checksum_benchmark` | 1,000 versioned records + WAL entries | `4.471s` | `223.66 Rec/sec` | DB size `8,000 bytes`, WAL size `28,000 bytes` |
+| `test_transaction_rollback_and_mvcc_conflict_benchmark` | 500 cycles (`rollback` + MVCC commit per cycle) | `3.273s` | `152.79 Cycles/sec` | 500 rollbacks and 500 MVCC commits completed |
+| `test_wal_checksum_recovery_benchmark` | 500 WAL entries with checksum recovery | `1.296s` | ~`386 Entries/sec` recovery | Sample check value `0xDEADBEEFCAFEBABE` recovered |
 
 ---
 
@@ -74,7 +78,7 @@ Add `qdb` to your project's `Cargo.toml`:
 
 ```toml
 [dependencies]
-quat_db = "0.6.0"
+quat_db = "0.7.0"
 
 ```
 
@@ -127,6 +131,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Original DNA: {}", dna_sample);
     println!("Unpacked DNA: {}", unpacked_dna);
+    Ok(())
+}
+```
+
+### Quaternary Bitwise Ops, Batch API & Rollback
+
+```rust
+use quat_db::engine::QuatDb;
+use quat_db::index::QuatIndex;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = QuatDb::open("records.qdb")?;
+
+    // 1. Batch insert & batch read
+    let keys = db.insert_batch(&[0x00E4_00E4_00E4_00E4, u64::MAX])?;
+    let _batch_values = db.get_batch(&keys)?;
+
+    // 2. Batch pattern scan across memory-mapped chunks
+    let _matches = db.query_pattern_batch(&[u64::MAX], 32)?;
+
+    // 3. Quaternary bitwise AND / OR / XOR on 32 packed quats per u64
+    let a = 0b11_10_01_00_u64;
+    let b = 0b11_00_11_00_u64;
+    let _q_and = QuatIndex::quat_and(a, b);
+    let _q_or = QuatIndex::quat_or(a, b);
+    let _q_xor = QuatIndex::quat_xor(a, b);
+
+    // 4. Staged transaction with rollback
+    let mut tx = db.begin_transaction();
+    tx.stage_insert(0xDEAD_BEEF_CAFE_BABE);
+    tx.rollback();
+
     Ok(())
 }
 ```
@@ -227,6 +263,38 @@ if (err != QUAT_OK) {
 }
 
     // 4. Close database
+    quat_db_close(db);
+    return 0;
+}
+```
+
+### Extended Error Codes & Single-Quat Read (C / C++ / C#)
+
+When calling `quat_db` across the C ABI (`ffi.rs`), handle both existing error codes and newer status codes (`UnsupportedVersion = 10`, `MvccConflict = 11`):
+
+```c
+#include <stdio.h>
+#include <stdint.h>
+#include "quat_db.h"
+
+int main(void) {
+    QuatDbHandle* db = NULL;
+    if (quat_db_open("extended.qdb", &db) != QUAT_OK) {
+        return 1;
+    }
+
+    // 0b11_10_01_00 -> quat[0]=0 (Q0), quat[1]=1 (Q1), quat[2]=2 (Q2), quat[3]=3 (Q3)
+    uint64_t chunk = 0b11100100ULL;
+    uint64_t key = 0;
+    if (quat_db_insert(db, chunk, &key) == QUAT_OK) {
+        uint8_t q0 = 0, q3 = 0;
+        if (quat_db_get_single_quat(db, key, 0, &q0) == QUAT_OK &&
+            quat_db_get_single_quat(db, key, 3, &q3) == QUAT_OK) {
+            printf("key=%llu, q0=%u, q3=%u\n",
+                   (unsigned long long)key, (unsigned)q0, (unsigned)q3);
+        }
+    }
+
     quat_db_close(db);
     return 0;
 }

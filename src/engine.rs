@@ -14,6 +14,24 @@ pub struct QuatDb {
     global_version: Arc<AtomicU64>,
 }
 
+#[derive(Debug, Default)]
+pub struct DbMetrics {
+    pub inserts_total: AtomicU64,
+    pub reads_total: AtomicU64,
+    pub pattern_queries_total: AtomicU64,
+    pub mvcc_commits_total: AtomicU64,
+    pub mvcc_conflicts_total: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DbMetricsSnapshot {
+    pub inserts_total: u64,
+    pub reads_total: u64,
+    pub pattern_queries_total: u64,
+    pub mvcc_commits_total: u64,
+    pub mvcc_conflicts_total: u64,
+}
+
 impl QuatDb {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut storage = QuatStorage::open(path)?;
@@ -111,6 +129,102 @@ impl QuatDb {
         }
     }
 
+    /// Batch pattern scan over memory-mapped chunks.
+    /// Evaluates multiple `u64` patterns in a single pass over the storage slice,
+    /// returning a matching `Vec<Vec<u64>>` of chunk indices per pattern.
+    pub fn query_pattern_batch(
+        &self,
+        patterns: &[u64],
+        min_matches: u32,
+    ) -> Result<Vec<Vec<u64>>> {
+        let mut results: Vec<Vec<u64>> = vec![Vec::new(); patterns.len()];
+        if patterns.is_empty() {
+            return Ok(results);
+        }
+
+        let storage = self.storage.read();
+        let Some(mmap_slice) = storage.get_mmap_slice() else {
+            return Ok(results);
+        };
+
+        for (chunk_idx, chunk_bytes) in mmap_slice.chunks_exact(8).enumerate() {
+            let slice: [u8; 8] = chunk_bytes
+                .try_into()
+                .map_err(|_| crate::errors::QuatDbError::InvalidOffset((chunk_idx * 8) as u64))?;
+            let chunk = u64::from_le_bytes(slice);
+
+            for (p_idx, &pattern) in patterns.iter().enumerate() {
+                if QuatIndex::match_quat_mask(chunk, pattern) >= min_matches {
+                    results[p_idx].push(chunk_idx as u64);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Inserts multiple packed quaternary chunks in a single write lock acquisition.
+    /// Returns the assigned keys in input order.
+    pub fn insert_batch(&self, chunks: &[u64]) -> Result<Vec<u64>> {
+        let mut storage = self.storage.write();
+        let mut index = self.index.write();
+
+        let mut keys = Vec::with_capacity(chunks.len());
+        for &chunk in chunks {
+            let offset = storage.append_chunk(chunk)?;
+            let key = offset / 8;
+            index.insert_primary(key, offset);
+            index.update_presence(chunk);
+            keys.push(key);
+        }
+
+        Ok(keys)
+    }
+
+    /// Emits a structured key-value log entry for diagnostics and observability.
+    pub fn log_event(&self, level: &str, event: &str, key: Option<u64>, detail: &str) {
+        let ver = self.global_version.load(Ordering::Acquire);
+        match key {
+            Some(k) => eprintln!(
+                "ts_version={ver} level={level} event={event} key={k} detail=\"{detail}\""
+            ),
+            None => eprintln!(
+                "ts_version={ver} level={level} event={event} detail=\"{detail}\""
+            ),
+        }
+    }
+
+    /// Returns a point-in-time snapshot of database counters.
+    pub fn metrics_snapshot(
+        metrics: &DbMetrics,
+    ) -> DbMetricsSnapshot {
+        DbMetricsSnapshot {
+            inserts_total: metrics.inserts_total.load(Ordering::Relaxed),
+            reads_total: metrics.reads_total.load(Ordering::Relaxed),
+            pattern_queries_total: metrics.pattern_queries_total.load(Ordering::Relaxed),
+            mvcc_commits_total: metrics.mvcc_commits_total.load(Ordering::Relaxed),
+            mvcc_conflicts_total: metrics.mvcc_conflicts_total.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Reads multiple keys in a single shared read lock acquisition.
+    pub fn get_batch(&self, keys: &[u64]) -> Result<Vec<Option<u64>>> {
+        let index = self.index.read();
+        let storage = self.storage.read();
+
+        let mut out = Vec::with_capacity(keys.len());
+        for &key in keys {
+            if let Some(offset) = index.lookup(key) {
+                let chunk = storage.read_chunk(offset)?;
+                out.push(Some(chunk));
+            } else {
+                out.push(None);
+            }
+        }
+
+        Ok(out)
+    }
+
     /// Zero-copy mmap scan over parallel readers
     pub fn query_pattern(&self, pattern: u64, min_matches: u32) -> Result<Vec<u64>> {
         let storage = self.storage.read();
@@ -129,12 +243,13 @@ impl QuatDb {
 
         Ok(matches)
     }
+
 }
 
 pub struct Transaction<'a> {
     db: &'a mut QuatDb,
     ops: Vec<(u64, u64)>, // (chunk, key)
-    read_version: u64,
+    pub read_version: u64,
 }
 
 impl<'a> Transaction<'a> {
@@ -146,6 +261,10 @@ impl<'a> Transaction<'a> {
     pub fn stage_insert(&mut self, chunk: u64) {
         let offset = 0; // calculated offset
         self.ops.push((chunk, offset));
+    }
+
+    pub fn rollback(&mut self) {
+       self.ops.clear();
     }
 
     pub fn commit(self) -> Result<()> {

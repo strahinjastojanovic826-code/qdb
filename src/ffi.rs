@@ -1,3 +1,31 @@
+// SAFETY OVERVIEW FOR FFI & UNSAFE BLOCKS IN THIS MODULE:
+//
+// 1. Raw pointers & null checks (`path`, `out_handle`, `handle`, `out_key`, `out_chunk`,
+//    `out_val`, `out_keys`, `out_len`, `dna_str`, `keys`):
+//    - Every C ABI entry point checks for null pointers before dereferencing or
+//      writing to output pointers, returning `QuatErrorCode::NullPointer` when null.
+//    - Callers must pass properly aligned, non-dangling pointers that remain valid
+//      for the duration of the call (`CStr::from_ptr` requires a valid NUL-terminated
+//      C string; `out_*` pointers must point to writable memory of the expected type).
+//
+// 2. Handle ownership & lifetime (`QuatDbHandle` via `Box::into_raw` / `Box::from_raw`):
+//    - `quat_db_open` allocates a heap-owned `QuatDbHandle` and transfers ownership
+//      to the caller via `*out_handle`.
+//    - `quat_db_close` reconstructs and drops the `Box<QuatDbHandle>` exactly once;
+//      the caller must not use `handle` after closing it or pass an invalid pointer.
+//
+// 3. Heap allocation transfer & deallocation (`quat_db_query_pattern` / `quat_db_free_keys`):
+//    - `quat_db_query_pattern` leaks a boxed slice (`std::mem::forget(boxed_slice)`) and
+//      returns `(out_keys, out_len)` to the caller.
+//    - The caller must release that buffer once via `quat_db_free_keys(keys, len)` with
+//      the exact `len` returned; passing mismatched lengths or foreign pointers is UB.
+//
+// 4. Synchronization & panic unwinding (`catch_unwind` + `AssertUnwindSafe`):
+//    - Calls are wrapped in `catch_unwind` to prevent panics from crossing the C ABI
+//      boundary (which would be undefined behavior), mapping panics to `QuatErrorCode::Panic`.
+//    - Lock guards (`read` / `write`) are acquired and released within each operation so
+//      concurrent callers do not race on mutable state.
+
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -22,6 +50,8 @@ pub enum QuatErrorCode {
     IndexOutOfBounds = 7,
     NotFound = 8,
     LockPoisoned = 9,
+    UnsupportedVersion = 10,
+    MvccConflict = 11,
     UnknownError = 99,
 }
 
@@ -32,6 +62,8 @@ impl From<&QuatDbError> for QuatErrorCode {
             QuatDbError::InvalidOffset(_) => QuatErrorCode::InvalidOffset,
             QuatDbError::CorruptedWal => QuatErrorCode::CorruptedWal,
             QuatDbError::IndexOutOfBounds { .. } => QuatErrorCode::IndexOutOfBounds,
+            QuatDbError::UnsupportedVersion(_) => QuatErrorCode::UnsupportedVersion,
+            QuatDbError::MvccConflict { .. } => QuatErrorCode::MvccConflict,
         }
     }
 }

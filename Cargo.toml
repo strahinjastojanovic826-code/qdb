@@ -1,6 +1,6 @@
 [package]
 name = "quat_db"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["Strale <strahinjastojanovic826@gmail.com>"]
 description = "High-performance 4-state (2-bit quat) embedded database engine"

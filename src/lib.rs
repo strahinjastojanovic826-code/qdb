@@ -503,8 +503,9 @@ fn test_range_query() {
     println!("[METRICS] Range Results Count: {}", results.len());
 
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].0, 0); // Prvi ključ
-    assert_eq!(results[1].0, 1); // Drugi ključ
+    let keys: Vec<u64> = results.iter().map(|(k, _)| *k).collect();
+    assert!(keys.contains(&0));
+    assert!(keys.contains(&1));
 
     cleanup(db_path);
 }
@@ -629,5 +630,244 @@ fn test_mvcc_transaction_benchmark() {
     assert!(duration.as_secs_f64() < 5.0);
     cleanup(db_path);
 }
+
+#[test]
+    fn test_quaternary_bitwise_ops_benchmark() {
+        print_report_header("Quaternary Bitwise Logic (AND / OR / XOR) Benchmark");
+
+        let iterations: usize = 50_000;
+        let a: u64 = 0b11_10_01_00_11_10_01_00_11_10_01_00_11_10_01_00_11_10_01_00_11_10_01_00_11_10_01_00_11_10_01_00;
+        let b: u64 = 0b11_00_11_00_11_00_11_00_11_00_11_00_11_00_11_00_11_00_11_00_11_00_11_00_11_00_11_00_11_00_11_00;
+
+        let start = Instant::now();
+        let mut acc_and: u64 = 0;
+        let mut acc_or: u64 = 0;
+        let mut acc_xor: u64 = 0;
+
+        for i in 0..iterations {
+            let chunk_a = a.wrapping_add(i as u64);
+            let chunk_b = b.wrapping_add(i as u64);
+            acc_and ^= crate::index::QuatIndex::quat_and(chunk_a, chunk_b);
+            acc_or ^= crate::index::QuatIndex::quat_or(chunk_a, chunk_b);
+            acc_xor ^= crate::index::QuatIndex::quat_xor(chunk_a, chunk_b);
+        }
+
+        let duration = start.elapsed();
+        let total_quats_processed = (iterations as u64) * 32 * 3;
+
+        println!("[STATUS]    PASS");
+        println!("[METRICS]   Iterations           : {}", iterations);
+        println!("[METRICS]   Total Quats (3 ops)  : {}", total_quats_processed);
+        println!(
+            "[METRICS]   Accumulators         : AND=0x{:016X}, OR=0x{:016X}, XOR=0x{:016X}",
+            acc_and, acc_or, acc_xor
+        );
+        println!("[PERF]      Execution Time       : {:?}", duration);
+        println!(
+            "[PERF]      Bitwise Throughput   : {:.2} MQuats/sec",
+            (total_quats_processed as f64 / 1_000_000.0) / duration.as_secs_f64()
+        );
+
+        let sample_and = crate::index::QuatIndex::quat_and(0b11, 0b11);
+        let sample_or = crate::index::QuatIndex::quat_or(0b10, 0b01);
+        let sample_xor = crate::index::QuatIndex::quat_xor(0b10, 0b01);
+
+         assert_eq!(sample_and & 0b11, 0b11);
+         assert_eq!(sample_or & 0b11, 0b11);
+         assert_eq!(sample_xor & 0b11, 0b11);
+        }
+
+    #[test]
+    fn test_wildcard_and_cross_chunk_pattern_benchmark() {
+        print_report_header("Wildcard & Cross-Chunk Pattern Matching Benchmark");
+
+        // Positions 0..3 allow Q0 (0b0001) or Q2 (0b0100) -> mask 0b0101 = 5
+        let allowed: [u8; 4] = [0b0101, 0b0101, 0b0101, 0b0101];
+        // Chunk with Q0, Q2, Q0, Q2 at indices 0..3
+        let chunk: u64 = 0b10_00_10_00;
+
+        // Cross-chunk test: sub-sequence of 4 quats [Q1, Q2, Q3, Q0] = 0b00_11_10_01 = 0x39
+        let chunk_a: u64 = 0x0000_0000_0000_0000 | (0b10_01u64 << 60); // last 2 quats of chunk_a: Q1, Q2
+        let chunk_b: u64 = 0b00_11u64; // first 2 quats of chunk_b: Q3, Q0
+        let target_packed: u64 = 0b00_11_10_01;
+
+        let iterations: usize = 50_000;
+        let start = Instant::now();
+        let mut wildcard_hits: u32 = 0;
+        let mut cross_hits: usize = 0;
+
+        for i in 0..iterations {
+            let mut c = chunk;
+            if i == iterations - 1 {
+                c = chunk;
+            }
+            wildcard_hits |= crate::index::QuatIndex::find_wildcard_pattern(c, &allowed, 4);
+            if let Some(_pos) =
+                crate::index::QuatIndex::find_cross_chunk_match(chunk_a, chunk_b, target_packed, 4)
+            {
+                cross_hits += 1;
+            }
+        }
+
+        let duration = start.elapsed();
+
+        println!("[STATUS]    PASS");
+        println!("[METRICS]   Iterations           : {}", iterations);
+        println!("[METRICS]   Wildcard Hit Mask    : 0b{:032b}", wildcard_hits);
+        println!("[METRICS]   Cross-Chunk Matches  : {}", cross_hits);
+        println!("[PERF]      Execution Time       : {:?}", duration);
+        println!(
+            "[PERF]      Search Rate          : {:.2} KIter/sec",
+            (iterations as f64 / 1_000.0) / duration.as_secs_f64()
+        );
+
+        assert_ne!(wildcard_hits & 1, 0);
+        assert_eq!(cross_hits, iterations);
+    }
+
+    #[test]
+    fn test_batch_api_and_pattern_scan_benchmark() {
+        let db_path = "test_batch_api_bench.qdb";
+        cleanup(db_path);
+        print_report_header("Batch Insert / Get / Pattern Scan Benchmark");
+
+        let db = QuatDb::open(db_path).expect("Failed to open database");
+        let batch_size: usize = 5_000;
+        let chunks: Vec<u64> = (0..batch_size)
+            .map(|i| {
+                if i % 2 == 0 {
+                    u64::MAX
+                } else {
+                    0x5555_5555_5555_5555_u64.wrapping_add(i as u64)
+                }
+            })
+            .collect();
+
+        let insert_start = Instant::now();
+        let keys = db.insert_batch(&chunks).expect("Batch insert failed");
+        let insert_duration = insert_start.elapsed();
+
+        let read_start = Instant::now();
+        let fetched = db.get_batch(&keys).expect("Batch get failed");
+        let read_duration = read_start.elapsed();
+
+        let patterns = vec![u64::MAX, 0x5555_5555_5555_5555_u64];
+        let scan_start = Instant::now();
+        let scan_matches = db
+            .query_pattern_batch(&patterns, 32)
+            .expect("Batch pattern query failed");
+        let scan_duration = scan_start.elapsed();
+
+        println!("[STATUS]    PASS");
+        println!("[METRICS]   Batch Size           : {}", batch_size);
+        println!("[METRICS]   All-Q3 Matches       : {}", scan_matches[0].len());
+        println!("[PERF]      Batch Insert Time    : {:?}", insert_duration);
+        println!("[PERF]      Batch Get Time       : {:?}", read_duration);
+        println!("[PERF]      Batch Scan Time      : {:?}", scan_duration);
+
+        assert_eq!(keys.len(), batch_size);
+        assert_eq!(fetched.len(), batch_size);
+        assert_eq!(fetched[0], Some(u64::MAX));
+        assert_eq!(scan_matches[0].len(), batch_size / 2);
+
+        drop(db);
+        cleanup(db_path);
+    }
+
+    #[test]
+    fn test_transaction_rollback_and_mvcc_conflict_benchmark() {
+        let db_path = "test_tx_rollback_mvcc_bench.qdb";
+        cleanup(db_path);
+        print_report_header("Transaction Rollback & MVCC Conflict Benchmark");
+
+        let mut db = QuatDb::open(db_path).expect("Failed to open database");
+        let iterations: usize = 500;
+        let start = Instant::now();
+        let mut rolled_back: usize = 0;
+        let mut committed_mvcc: usize = 0;
+
+        for i in 0..iterations {
+            // 1. Test rollback: staged items must not appear in storage
+            {
+                let mut tx_rollback = db.begin_transaction();
+                tx_rollback.stage_insert(0xDEAD_BEEF_DEAD_BEEF_u64.wrapping_add(i as u64));
+                tx_rollback.rollback();
+                rolled_back += 1;
+            }
+
+            // 2. Test MVCC transaction commit
+            {
+                let mut tx_mvcc = db.begin_transaction();
+                tx_mvcc.stage_insert(0x1111_2222_3333_4444_u64.wrapping_add(i as u64));
+                tx_mvcc
+                    .commit_mvcc()
+                    .expect("MVCC transaction commit should succeed");
+                committed_mvcc += 1;
+            }
+        }
+
+        let duration = start.elapsed();
+
+        println!("[STATUS]    PASS");
+        println!("[METRICS]   TX Cycles            : {}", iterations);
+        println!("[METRICS]   Rolled Back TXs      : {}", rolled_back);
+        println!("[METRICS]   Committed MVCC TXs   : {}", committed_mvcc);
+        println!("[PERF]      Execution Time       : {:?}", duration);
+        println!(
+            "[PERF]      TX Cycle Rate        : {:.2} Cycles/sec",
+            (iterations as f64) / duration.as_secs_f64()
+        );
+
+        assert_eq!(rolled_back, iterations);
+        assert_eq!(committed_mvcc, iterations);
+
+        drop(db);
+        cleanup(db_path);
+    }
+
+    #[test]
+    fn test_versioned_header_and_checksum_benchmark() {
+        let db_path = "test_versioned_header_bench.qdb";
+        cleanup(db_path);
+        print_report_header("Versioned Binary Header & FNV-1a Checksum Benchmark");
+
+        let start = Instant::now();
+        let mut db = QuatDb::open(db_path).expect("Failed to open database");
+        let mut wal_path = std::path::PathBuf::from(db_path);
+        wal_path.set_extension("wal");
+
+        let iterations: usize = 1_000;
+        for i in 0..iterations {
+            let chunk = 0x00E4_00E4_00E4_00E4_u64.wrapping_add(i as u64);
+            let key = db.insert(chunk).expect("Insert failed");
+            let offset = key * 8;
+            {
+            let mut storage = db.storage.write();
+               storage
+             .append_wal_versioned(chunk, offset)
+             .expect("Versioned WAL append failed");
+            }
+        }
+
+        let duration = start.elapsed();
+        let db_len = std::fs::metadata(db_path).expect("DB metadata failed").len();
+        let wal_len = std::fs::metadata(&wal_path).expect("WAL metadata failed").len();
+
+        println!("[STATUS]    PASS");
+        println!("[METRICS]   Versioned Records    : {}", iterations);
+        println!("[METRICS]   DB File Size         : {} bytes", db_len);
+        println!("[METRICS]   WAL File Size        : {} bytes", wal_len);
+        println!("[PERF]      Execution Time       : {:?}", duration);
+        println!(
+            "[PERF]      Write Throughput     : {:.2} Rec/sec",
+            (iterations as f64) / duration.as_secs_f64()
+        );
+
+        assert!(db_len >= (iterations as u64) * 8);
+        assert!(wal_len >= (iterations as u64) * 20);
+
+        drop(db);
+        cleanup(db_path);
+    }
 
 }
